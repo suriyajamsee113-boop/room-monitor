@@ -63,15 +63,23 @@ def main():
                 continue
 
             row_key = " | ".join(cols)
+            
+            # กรองเฉพาะรายการที่เป็นห้องประชุม และข้ามห้องสมุด
+            is_meeting_room = "ห้องประชุม" in row_key
+            is_library = "ห้องสมุด" in row_key or "library" in row_key.lower()
+
+            if is_library or not is_meeting_room:
+                continue
+
             if row_key not in seen_records:
                 seen_records.add(row_key)
                 new_count += 1
                 details = "\n".join([f"• {c}" for c in cols if c and len(c) < 100][:6])
-                msg = f"🔔 มีรายการจองห้องใหม่!\n------------------------\n{details}\n------------------------\n🌐 ดูรายละเอียด: {TARGET_URL}"
+                msg = f"🔔 มีรายการจองห้องประชุมใหม่!\n------------------------\n{details}\n------------------------\n🌐 ดูรายละเอียด: {TARGET_URL}"
                 send_line_message(msg)
 
         save_seen_records(seen_records)
-        print(f"[*] Done. Found {new_count} new entries.")
+        print(f"[*] Done. Found {new_count} new meeting room entries.")
 
 if __name__ == "__main__":
     main()
