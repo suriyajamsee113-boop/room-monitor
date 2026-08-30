@@ -2,9 +2,9 @@ name: Check Room Booking
 
 on:
   schedule:
-    # รันอัตโนมัติทุกๆ 15 นาที
-    - cron: '*/15 * * * *'
-  workflow_dispatch: # ปุ่มสำหรับกดสั่งรันเองเพื่อทดสอบ
+    # รันอัตโนมัติทุกๆ 5 นาที ตลอด 24 ชม.
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
 
 jobs:
   check:
@@ -19,6 +19,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
       - name: Install Dependencies
         run: |
