@@ -1,0 +1,40 @@
+name: Check Room Booking
+
+on:
+  schedule:
+    # รันอัตโนมัติทุกๆ 15 นาที
+    - cron: '*/15 * * * *'
+  workflow_dispatch: # ปุ่มสำหรับกดสั่งรันเองเพื่อทดสอบ
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          pip install requests beautifulsoup4 playwright
+          playwright install --with-deps chromium
+
+      - name: Run Room Monitor
+        env:
+          LINE_ACCESS_TOKEN: ${{ secrets.LINE_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+        run: python room_monitor.py
+
+      - name: Save History
+        run: |
+          git config --global user.name "GitHub Action"
+          git config --global user.email "action@github.com"
+          git add seen_bookings.json
+          git commit -m "Update seen bookings" || exit 0
+          git push
