@@ -2,7 +2,6 @@ name: Check Room Booking
 
 on:
   schedule:
-    # รันอัตโนมัติทุกๆ 5 นาที ตลอด 24 ชม.
     - cron: '*/5 * * * *'
   workflow_dispatch:
 
@@ -22,8 +21,7 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install requests beautifulsoup4 playwright
-          playwright install --with-deps chromium
+          pip install requests beautifulsoup4
 
       - name: Run Room Monitor
         env:
