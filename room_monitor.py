@@ -1,12 +1,12 @@
 import json
 import os
-import time
+import re
 import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
-CHANNEL_ACCESS_TOKEN = os.environ.get("e/omrS4WESAOvdCcHisAtVbl3cXPaB9JRtHCG1iBzk9NkvbwArnUZV7g+kERgEUzw1ens1r6+gZIQT4y8iMFlzF9BICFvQ+2iSn/DHLQShfTbI+Lfl6QlNiMl4hd01oI1U38X3mmzOy/Rh5oTRF0UAdB04t89/1O/w1cDnyilFU=")
-USER_ID = os.environ.get("U942101eb1df461307077223912564c22")
+CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_ACCESS_TOKEN")
+USER_ID = os.environ.get("LINE_USER_ID")
 
 TARGET_URL = "http://office.scphc.ac.th:8080/"
 SEEN_FILE = "seen_bookings.json"
@@ -49,44 +49,53 @@ def main():
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+        context = browser.new_context()
+        page = context.new_page()
         page.goto(TARGET_URL, timeout=30000)
         page.wait_for_timeout(4000)
 
-        # ค้นหาบล็อกกิจกรรมทั้งหมดบนหน้าตาราง/ปฏิทิน
-        # มองหา element ที่คลิกเปิด modal ได้ (ลิงก์/บล็อกสี/แถบเวลา)
-        event_elements = page.query_selector_all("a, div[onclick], td[onclick], .fc-event, div[class*='event']")
-        print(f"[*] Found candidate clickable items: {len(event_elements)}")
+        # ค้นหาบล็อกรายการบนปฏิทินที่ระบุเวลาและชื่อกิจกรรม
+        events = page.locator(".fc-event, .event, a[href*='view'], a[href*='detail'], a[onclick*='detail'], a[onclick*='view'], a.cal-event, td div[onclick]").all()
+        
+        # หากไม่เจอ class ปฏิทิน ให้ดึงลิงก์ทั้งหมดที่มีข้อความเวลาหรือตัวหนังสือ
+        if not events:
+            events = [el for el in page.locator("a, td[onclick]").all() if len(el.inner_text().strip()) > 3]
+
+        print(f"[*] Identified event items to inspect: {len(events)}")
 
         new_count = 0
 
-        for el in event_elements:
+        for i, el in enumerate(events[:30]):  # ตรวจสอบรายการล่าสุด
             try:
                 txt = el.inner_text().strip()
-                if not txt or len(txt) < 3:
+                if not txt:
                     continue
 
-                # ลองคลิกที่บล็อกรายการเพื่อเปิดหน้าต่าง Popup
-                el.click(timeout=1500)
+                # คลิกเปิดกล่องรายละเอียด
+                el.click(timeout=2000, force=True)
                 page.wait_for_timeout(1000)
 
-                # ดึงเนื้อหาจาก Popup รายละเอียด
-                modal = page.query_selector(".modal-content, .modal-body, div[class*='dialog'], div[class*='popup']")
-                modal_html = modal.inner_html() if modal else page.content()
+                html = page.content()
+                soup = BeautifulSoup(html, "html.parser")
 
-                if "รายละเอียดของ การจอง" in modal_html or "ชื่อห้อง" in modal_html:
-                    soup = BeautifulSoup(modal_html, "html.parser")
-                    
-                    data = {}
-                    for tr in soup.find_all("tr"):
+                # ตรวจหาตารางข้อมูลใน Popup
+                tables = soup.find_all("table")
+                data = {}
+                for tbl in tables:
+                    for tr in tbl.find_all("tr"):
                         tds = tr.find_all(["td", "th"])
                         if len(tds) >= 2:
                             k = tds[0].get_text(strip=True)
                             v = tds[1].get_text(strip=True)
                             data[k] = v
 
-                    topic = data.get("หัวข้อ", "")
-                    room_name = data.get("ชื่อห้อง", "")
+                room_name = data.get("ชื่อห้อง", "")
+                topic = data.get("หัวข้อ", "")
+                
+                if room_name or "รายละเอียดของ การจอง" in html:
+                    print(f"[{i}] Found Modal -> Room: '{room_name}' | Topic: '{topic}'")
+
+                if "ห้องประชุม" in room_name:
                     building = data.get("อาคาร/สถานที่", "")
                     booker = data.get("ชื่อผู้จอง", "")
                     phone = data.get("โทรศัพท์", "")
@@ -94,14 +103,11 @@ def main():
                     dept = data.get("แผนกที่ขอใช้", "")
                     status = data.get("สถานะ", "")
 
-                    # สร้าง Unique Key ป้องกันการแจ้งเตือนซ้ำ
-                    unique_id = f"{room_name} | {topic} | {datetime_str} | {booker}"
+                    unique_id = f"{room_name}_{topic}_{datetime_str}_{booker}"
 
-                    # ตรวจสอบเงื่อนไขห้องประชุม
-                    if "ห้องประชุม" in room_name and unique_id not in seen_records:
+                    if unique_id not in seen_records:
                         seen_records.add(unique_id)
                         new_count += 1
-
                         msg = (
                             f"🔔 มีรายการจองห้องประชุมใหม่!\n"
                             f"━━━━━━━━━━━━━━━━━━\n"
@@ -116,12 +122,15 @@ def main():
                         )
                         send_line_message(msg)
 
-                    # กดปิด Modal (ถ้ามีปุ่มปิดกากบาท)
-                    close_btn = page.query_selector("button.close, .close, span.close, [data-dismiss='modal']")
-                    if close_btn:
-                        close_btn.click(timeout=1000)
-                        page.wait_for_timeout(500)
-            except Exception:
+                # ปิด popup เพื่อเตรียมคลิกตัวถัดไป
+                close_btn = page.locator(".modal button.close, .modal .close, button:has-text('ปิด'), button:has-text('Close'), .bootbox-close-button").first
+                if close_btn.is_visible():
+                    close_btn.click(timeout=1000)
+                    page.wait_for_timeout(300)
+                else:
+                    page.keyboard.press("Escape")
+
+            except Exception as ex:
                 continue
 
         save_seen_records(seen_records)
