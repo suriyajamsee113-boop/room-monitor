@@ -50,47 +50,28 @@ def main():
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
         page.goto(TARGET_URL, timeout=30000)
-        page.wait_for_timeout(5000)
+        page.wait_for_timeout(4000)
 
-        # รวมค้นหาทั้งในหน้าหลัก และทุก Frame/iFrame
-        frames_to_check = [page] + page.frames
-
-        print(f"[*] Total frames/pages to scan: {len(frames_to_check)}")
+        # ค้นหา element รายการกิจกรรมในหน้าหลัก
+        items = page.locator("a, div[onclick], td[onclick], div[class*='event']").all()
+        print(f"[*] Total candidates found: {len(items)}")
 
         new_count = 0
 
-        for frame_idx, frame in enumerate(frames_to_check):
-            # ค้นหาตัวที่คลิกได้ทั้งหมดในแต่ละ frame
-            candidates = frame.locator("a, div[onclick], td[onclick], div[class*='event'], span[onclick]").all()
-            
-            valid_items = []
-            for item in candidates:
-                try:
-                    txt = item.inner_text().strip()
-                    if txt and len(txt) > 2 and ("ห้อง" in txt or ":" in txt or " " in txt):
-                        valid_items.append((item, txt))
-                except Exception:
+        for item in items:
+            try:
+                txt = item.inner_text().strip()
+                # กรองเอาเฉพาะบล็อกที่มีข้อความกิจกรรม
+                if not txt or len(txt) < 3 or "ห้องสมุด" in txt:
                     continue
 
-            if valid_items:
-                print(f"[*] Frame {frame_idx} found {len(valid_items)} event candidates.")
+                # คลิกเปิดดูรายละเอียด Popup
+                item.click(timeout=1000, force=True)
+                page.wait_for_timeout(600)
 
-            for el, txt in valid_items[:20]:
-                try:
-                    el.click(timeout=1500, force=True)
-                    page.wait_for_timeout(800)
-
-                    soup = BeautifulSoup(page.content(), "html.parser")
-                    # ค้นหาใน frame ด้วยเผื่อ popup อยู่ข้างใน
-                    for f in page.frames:
-                        try:
-                            soup_f = BeautifulSoup(f.content(), "html.parser")
-                            if "รายละเอียดของ การจอง" in f.content() or "ชื่อห้อง" in f.content():
-                                soup = soup_f
-                                break
-                        except Exception:
-                            pass
-
+                html = page.content()
+                if "ชื่อห้อง" in html or "รายละเอียดของ การจอง" in html:
+                    soup = BeautifulSoup(html, "html.parser")
                     data = {}
                     for tr in soup.find_all("tr"):
                         tds = tr.find_all(["td", "th"])
@@ -119,9 +100,9 @@ def main():
                             )
                             send_line_message(msg)
 
-                    page.keyboard.press("Escape")
-                except Exception:
-                    continue
+                page.keyboard.press("Escape")
+            except Exception:
+                continue
 
         save_seen_records(seen_records)
         print(f"[*] Done. Processed {new_count} new entries.")
