@@ -44,74 +44,53 @@ def save_seen_records(records):
 
 def main():
     seen_records = load_seen_records()
-    print(f"[*] Opening {TARGET_URL} with Headless Browser...")
+    print(f"[*] Opening {TARGET_URL}...")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
         page.goto(TARGET_URL, timeout=30000)
-        # รอให้ปฏิทินเรนเดอร์กล่องกิจกรรม
-        page.wait_for_timeout(4000)
+        page.wait_for_timeout(5000)
 
-        # 1. ลองดึงข้อมูลกิจกรรมทั้งหมดที่ FullCalendar เก็บไว้ใน Memory โดยตรง (เร็วมาก)
-        events_data = page.evaluate("""() => {
-            try {
-                if (window.$ && $.fn && $.fn.fullCalendar) {
-                    var clientEvents = $('.calendar, #calendar, [id*="calendar"]').fullCalendar('clientEvents');
-                    if (clientEvents && clientEvents.length > 0) {
-                        return clientEvents.map(e => ({
-                            id: e.id || '',
-                            title: e.title || '',
-                            start: e.start ? e.start.format() : '',
-                            end: e.end ? e.end.format() : '',
-                            description: e.description || '',
-                            location: e.location || '',
-                            room: e.room || ''
-                        }));
-                    }
-                }
-            } catch(err) {}
-            return [];
-        }""")
+        # รวมค้นหาทั้งในหน้าหลัก และทุก Frame/iFrame
+        frames_to_check = [page] + page.frames
+
+        print(f"[*] Total frames/pages to scan: {len(frames_to_check)}")
 
         new_count = 0
 
-        # หากดึงจาก FullCalendar Memory ได้
-        if events_data:
-            print(f"[*] Extracted {len(events_data)} events from calendar memory directly.")
-            for ev in events_data:
-                full_text = f"{ev.get('title')} {ev.get('description')} {ev.get('location')} {ev.get('room')}"
-                if "ห้องสมุด" in full_text or "library" in full_text.lower():
+        for frame_idx, frame in enumerate(frames_to_check):
+            # ค้นหาตัวที่คลิกได้ทั้งหมดในแต่ละ frame
+            candidates = frame.locator("a, div[onclick], td[onclick], div[class*='event'], span[onclick]").all()
+            
+            valid_items = []
+            for item in candidates:
+                try:
+                    txt = item.inner_text().strip()
+                    if txt and len(txt) > 2 and ("ห้อง" in txt or ":" in txt or " " in txt):
+                        valid_items.append((item, txt))
+                except Exception:
                     continue
 
-                ev_id = str(ev.get("id") or f"{ev.get('title')}_{ev.get('start')}")
-                if ev_id not in seen_records:
-                    seen_records.add(ev_id)
-                    new_count += 1
-                    msg = (
-                        f"🔔 รายการจองห้องประชุมใหม่\n"
-                        f"━━━━━━━━━━━━━━━━━━\n"
-                        f"1. หัวข้อ: {ev.get('title')}\n"
-                        f"2. ชื่อห้อง: {ev.get('room') or ev.get('location') or 'ห้องประชุม'}\n"
-                        f"3. ชื่อผู้จอง: {ev.get('description') or '-'}\n"
-                        f"4. วันที่ เวลา: {ev.get('start')}\n"
-                        f"━━━━━━━━━━━━━━━━━━\n"
-                        f"🌐 ดูรายละเอียด: {TARGET_URL}"
-                    )
-                    send_line_message(msg)
+            if valid_items:
+                print(f"[*] Frame {frame_idx} found {len(valid_items)} event candidates.")
 
-        # 2. หากดึงจาก memory ไม่ได้ ให้ดึงจาก HTML elements ที่เรนเดอร์บนหน้าจอ
-        else:
-            print("[*] Fallback: Reading rendered DOM elements...")
-            event_nodes = page.locator(".fc-event, .fc-content, a.cal-event, tr.event-row").all()
-            print(f"[*] Found {len(event_nodes)} visible events on page.")
-
-            for i, node in enumerate(event_nodes[:15]):
+            for el, txt in valid_items[:20]:
                 try:
-                    node.click(timeout=1500)
-                    page.wait_for_timeout(600)
+                    el.click(timeout=1500, force=True)
+                    page.wait_for_timeout(800)
 
                     soup = BeautifulSoup(page.content(), "html.parser")
+                    # ค้นหาใน frame ด้วยเผื่อ popup อยู่ข้างใน
+                    for f in page.frames:
+                        try:
+                            soup_f = BeautifulSoup(f.content(), "html.parser")
+                            if "รายละเอียดของ การจอง" in f.content() or "ชื่อห้อง" in f.content():
+                                soup = soup_f
+                                break
+                        except Exception:
+                            pass
+
                     data = {}
                     for tr in soup.find_all("tr"):
                         tds = tr.find_all(["td", "th"])
