@@ -59,7 +59,6 @@ def main():
 
     soup = BeautifulSoup(html, "html.parser")
     
-    # 1. หาลิงก์หน้ารายละเอียดที่อยู่ในหน้าเว็บทั้งหมด
     detail_links = []
     for a in soup.find_all("a", href=True):
         href = a["href"]
@@ -71,7 +70,6 @@ def main():
     print(f"[*] Found {len(detail_links)} detail links to check.")
 
     new_count = 0
-    # ตรวจสอบทีละรายการแบบยิงตรง (ใช้เวลาเพียง 0.2 วินาทีต่อรายการ)
     for link in detail_links[:20]:
         try:
             r = session.get(link, timeout=10)
@@ -88,29 +86,25 @@ def main():
             room_name = data.get("ชื่อห้อง", "")
             topic = data.get("หัวข้อ", "")
 
-            # ถ้าพบว่าเป็นห้องประชุม
+            # กรองเฉพาะรายการห้องประชุม
             if "ห้องประชุม" in room_name or "ห้องประชุม" in r.text:
-                building = data.get("อาคาร/สถานที่", "")
                 booker = data.get("ชื่อผู้จอง", "")
                 datetime_str = data.get("วันที่", "")
-                phone = data.get("โทรศัพท์", "")
-                status = data.get("สถานะ", "")
-                dept = data.get("แผนกที่ขอใช้", "")
 
                 unique_id = f"{room_name}_{topic}_{datetime_str}_{booker}"
 
                 if unique_id not in seen_records:
                     seen_records.add(unique_id)
                     new_count += 1
+                    
+                    # รูปแบบข้อความแสดง 4 รายละเอียดตามที่ต้องการ
                     msg = (
-                        f"🔔 มีรายการจองห้องประชุมใหม่!\n"
+                        f"🔔 รายการจองห้องประชุมใหม่\n"
                         f"━━━━━━━━━━━━━━━━━━\n"
-                        f"📌 ห้อง: {room_name} ({building})\n"
-                        f"📝 หัวข้อ: {topic}\n"
-                        f"📅 วัน-เวลา: {datetime_str}\n"
-                        f"👤 ผู้จอง: {booker} ({dept})\n"
-                        f"📞 เบอร์โทร: {phone}\n"
-                        f"📊 สถานะ: {status}\n"
+                        f"1. หัวข้อ: {topic}\n"
+                        f"2. ชื่อห้อง: {room_name}\n"
+                        f"3. ชื่อผู้จอง: {booker}\n"
+                        f"4. วันที่ เวลา: {datetime_str}\n"
                         f"━━━━━━━━━━━━━━━━━━\n"
                         f"🌐 ดูรายละเอียด: {link}"
                     )
