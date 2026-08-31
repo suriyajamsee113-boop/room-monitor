@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import time
 import requests
 from bs4 import BeautifulSoup
@@ -13,6 +14,7 @@ SEEN_FILE = "seen_bookings.json"
 
 def send_line_message(text):
     if not CHANNEL_ACCESS_TOKEN or not USER_ID:
+        print("[!] Missing LINE Token / User ID")
         return
     url = "https://api.line.me/v2/bot/message/push"
     headers = {
@@ -24,9 +26,12 @@ def send_line_message(text):
         "messages": [{"type": "text", "text": text}]
     }
     try:
-        requests.post(url, headers=headers, json=payload, timeout=10)
-    except Exception:
-        pass
+        res = requests.post(url, headers=headers, json=payload, timeout=10)
+        print(f"[*] LINE status: {res.status_code}")
+        if res.status_code != 200:
+            print(f"[!] Response: {res.text}")
+    except Exception as e:
+        print(f"[!] Send error: {e}")
 
 def load_seen_records():
     if os.path.exists(SEEN_FILE):
@@ -41,83 +46,91 @@ def save_seen_records(records):
     with open(SEEN_FILE, "w", encoding="utf-8") as f:
         json.dump(list(records), f, ensure_ascii=False, indent=2)
 
-def check_rooms(playwright_instance=None):
-    seen_records = load_seen_records()
-    print(f"[*] [{time.strftime('%H:%M:%S')}] กำลังสแกนหน้าเว็บ...")
+def extract_details(text):
+    """แยก 4 หัวข้อจากข้อความในกล่องกิจกรรมหรือ Popup"""
+    # 1. เวลา
+    time_match = re.search(r"(\d{1,2}:\d{2}\s*(?:น\.)?(?:\s*-\s*\d{1,2}:\d{2}\s*(?:น\.)?)?)", text)
+    time_str = time_match.group(1) if time_match else "-"
 
-    def run_scan(p):
+    # 2. ชื่อห้อง
+    room_match = re.search(r"(ห้องประชุม[^\s\n\r,]+|ห้อง[^\s\n\r,]+)", text)
+    room_name = room_match.group(1) if room_match else "ห้องประชุม"
+
+    # 3. ผู้จอง
+    booker_match = re.search(r"(?:ผู้จอง|โดย|ชื่อผู้จอง)[:\s]+([^\n\r,]+)", text)
+    booker = booker_match.group(1).strip() if booker_match else "-"
+
+    # 4. หัวข้อ (ตัดส่วนเวลาและห้องออกเพื่อเป็นหัวข้อ)
+    clean_topic = re.sub(r"\d{1,2}:\d{2}", "", text)
+    clean_topic = re.sub(r"ห้องประชุม[^\s]+", "", clean_topic).strip()
+    topic = clean_topic if len(clean_topic) > 2 else text
+
+    return topic, room_name, booker, time_str
+
+def main():
+    seen_records = load_seen_records()
+    print(f"[*] [{time.strftime('%H:%M:%S')}] กำลังเปิดหน้าเว็บ...")
+
+    with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
-        new_count = 0
         
         try:
             page.goto(TARGET_URL, timeout=30000)
             page.wait_for_timeout(4000)
 
-            # 1. เจาะจงเฉพาะกล่องกิจกรรมรายใบ (fc-event)
-            event_elements = page.locator(".fc-event, a.fc-day-grid-event, a.fc-time-grid-event").all()
-            print(f"[*] พบกล่องการจองย่อยทั้งหมด: {len(event_elements)} รายการ")
+            # ค้นหากล่องกิจกรรมทั้งหมดในปฏิทิน
+            events = page.locator(".fc-event, a.fc-event, div.fc-content, a[href*='booking'], a[onclick*='view']").all()
+            print(f"[*] เจอกล่องกิจกรรม: {len(events)} กล่อง")
 
-            for el in event_elements:
-                try:
-                    # คลิกเปิด Popup รายละเอียด
-                    el.click(timeout=1000, force=True)
-                    page.wait_for_timeout(500)
-
-                    soup = BeautifulSoup(page.content(), "html.parser")
-                    
-                    # ค้นหาตารางข้อมูลใน Modal Popup
-                    data = {}
-                    for tr in soup.find_all("tr"):
-                        tds = tr.find_all(["td", "th"])
-                        if len(tds) >= 2:
-                            k = tds[0].get_text(strip=True)
-                            v = tds[1].get_text(strip=True)
-                            data[k] = v
-
-                    room_name = data.get("ชื่อห้อง", "")
-                    topic = data.get("หัวข้อ", "")
-                    booker = data.get("ชื่อผู้จอง", "")
-                    datetime_str = data.get("วันที่", "") or data.get("วันและเวลา", "")
-
-                    # กรองเฉพาะรายการห้องประชุมที่มีข้อมูลครบถ้วน
-                    if "ห้องประชุม" in room_name or (topic and datetime_str and not "ห้องสมุด" in room_name):
-                        unique_id = f"{room_name}_{topic}_{datetime_str}_{booker}"
-
-                        if unique_id not in seen_records:
-                            seen_records.add(unique_id)
-                            new_count += 1
-                            
-                            # ข้อความ 4 หัวข้อตามที่ต้องการ
-                            msg = (
-                                f"🔔 มีการจองห้องประชุมใหม่\n"
-                                f"━━━━━━━━━━━━━━━━━━\n"
-                                f"1. หัวข้อ: {topic or '-'}\n"
-                                f"2. ชื่อห้อง: {room_name or '-'}\n"
-                                f"3. ชื่อผู้จอง: {booker or '-'}\n"
-                                f"4. วันที่ เวลา: {datetime_str or '-'}\n"
-                                f"━━━━━━━━━━━━━━━━━━\n"
-                                f"🌐 ระบบ: {TARGET_URL}"
-                            )
-                            send_line_message(msg)
-                            print(f"[+] แจ้งเตือนรายการใหม่: {topic}")
-
-                    # ปิด Popup
-                    page.keyboard.press("Escape")
-                except Exception:
+            new_count = 0
+            for idx, ev in enumerate(events):
+                raw_text = ev.inner_text().strip()
+                if not raw_text or len(raw_text) < 3 or "ห้องสมุด" in raw_text:
                     continue
 
+                # พยายามคลิกเพื่อดึงข้อความเพิ่มเติมจาก Popup (ถ้ามี)
+                popup_text = ""
+                try:
+                    ev.click(timeout=800, force=True)
+                    page.wait_for_timeout(400)
+                    soup = BeautifulSoup(page.content(), "html.parser")
+                    modal = soup.find(class_=re.compile(r"modal|popup|dialog|detail", re.I))
+                    if modal:
+                        popup_text = modal.get_text(separator=" ", strip=True)
+                    page.keyboard.press("Escape")
+                except Exception:
+                    pass
+
+                full_info = popup_text if len(popup_text) > len(raw_text) else raw_text
+                topic, room_name, booker, datetime_str = extract_details(full_info)
+
+                unique_key = f"{topic}_{datetime_str}_{room_name}"
+
+                if unique_key not in seen_records:
+                    seen_records.add(unique_key)
+                    new_count += 1
+
+                    msg = (
+                        f"🔔 รายการจองห้องประชุมใหม่\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"1. หัวข้อ: {topic}\n"
+                        f"2. ชื่อห้อง: {room_name}\n"
+                        f"3. ชื่อผู้จอง: {booker}\n"
+                        f"4. วันที่ เวลา: {datetime_str}\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"🌐 ดูระบบ: {TARGET_URL}"
+                    )
+                    print(f"[+] ตรวจพบรายการใหม่: {topic}")
+                    send_line_message(msg)
+
+            save_seen_records(seen_records)
+            print(f"[*] รอบนี้ส่งแจ้งเตือนสำเร็จ: {new_count} รายการ")
+
+        except Exception as e:
+            print(f"[!] ผิดพลาด: {e}")
         finally:
             browser.close()
 
-        save_seen_records(seen_records)
-        print(f"[*] สแกนเสร็จสิ้น (ส่งแจ้งเตือน {new_count} รายการ)")
-
-    if playwright_instance:
-        run_scan(playwright_instance)
-    else:
-        with sync_playwright() as p:
-            run_scan(p)
-
 if __name__ == "__main__":
-    check_rooms()
+    main()
