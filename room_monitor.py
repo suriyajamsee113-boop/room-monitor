@@ -5,8 +5,8 @@ import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
-CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_ACCESS_TOKEN")
-USER_ID = os.environ.get("LINE_USER_ID")
+CHANNEL_ACCESS_TOKEN = os.environ.get("e/omrS4WESAOvdCcHisAtVbl3cXPaB9JRtHCG1iBzk9NkvbwArnUZV7g+kERgEUzw1ens1r6+gZIQT4y8iMFlzF9BICFvQ+2iSn/DHLQShfTbI+Lfl6QlNiMl4hd01oI1U38X3mmzOy/Rh5oTRF0UAdB04t89/1O/w1cDnyilFU=")
+USER_ID = os.environ.get("U942101eb1df461307077223912564c22")
 
 TARGET_URL = "http://office.scphc.ac.th:8080/"
 SEEN_FILE = "seen_bookings.json"
