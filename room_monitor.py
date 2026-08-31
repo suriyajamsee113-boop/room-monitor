@@ -1,6 +1,6 @@
 import json
 import os
-import re
+import time
 import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
@@ -13,7 +13,6 @@ SEEN_FILE = "seen_bookings.json"
 
 def send_line_message(text):
     if not CHANNEL_ACCESS_TOKEN or not USER_ID:
-        print("[!] ขาดข้อมูล LINE Token หรือ User ID")
         return
     url = "https://api.line.me/v2/bot/message/push"
     headers = {
@@ -25,12 +24,9 @@ def send_line_message(text):
         "messages": [{"type": "text", "text": text}]
     }
     try:
-        res = requests.post(url, headers=headers, json=payload, timeout=10)
-        print(f"[*] สถานะการส่ง LINE: {res.status_code}")
-        if res.status_code != 200:
-            print(f"[!] LINE Response: {res.text}")
-    except Exception as e:
-        print(f"[!] ส่ง LINE ไม่สำเร็จ: {e}")
+        requests.post(url, headers=headers, json=payload, timeout=10)
+    except Exception:
+        pass
 
 def load_seen_records():
     if os.path.exists(SEEN_FILE):
@@ -45,50 +41,83 @@ def save_seen_records(records):
     with open(SEEN_FILE, "w", encoding="utf-8") as f:
         json.dump(list(records), f, ensure_ascii=False, indent=2)
 
-def main():
+def check_rooms(playwright_instance=None):
     seen_records = load_seen_records()
-    print(f"[*] กำลังเปิดหน้าเว็บ {TARGET_URL}...")
+    print(f"[*] [{time.strftime('%H:%M:%S')}] กำลังสแกนหน้าเว็บ...")
 
-    with sync_playwright() as p:
+    def run_scan(p):
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
-        page.goto(TARGET_URL, timeout=30000)
-        page.wait_for_timeout(4000)
-
-        soup = BeautifulSoup(page.content(), "html.parser")
-        
-        # ค้นหากล่องกิจกรรมทั้งหมดในปฏิทิน
-        items = soup.find_all(["a", "div", "span"], class_=lambda c: c and any(x in str(c).lower() for x in ["event", "title", "cal"]))
-        if not items:
-            items = soup.find_all("a")
-
-        valid_events = []
-        for el in items:
-            t = el.get_text(strip=True)
-            if t and len(t) > 3 and not any(skip in t for skip in ["เข้าสู่ระบบ", "หน้าแรก", "ห้องสมุด", "Library"]):
-                valid_events.append(t)
-
-        valid_events = list(dict.fromkeys(valid_events))
-        print(f"[*] ตรวจพบรายการในปฏิทิน: {len(valid_events)} รายการ")
-
         new_count = 0
-        for text in valid_events:
-            if text not in seen_records:
-                seen_records.add(text)
-                new_count += 1
-                msg = (
-                    f"🔔 รายการจองห้องประชุมใหม่\n"
-                    f"━━━━━━━━━━━━━━━━━━\n"
-                    f"📝 รายละเอียด: {text}\n"
-                    f"━━━━━━━━━━━━━━━━━━\n"
-                    f"🌐 ตรวจสอบ: {TARGET_URL}"
-                )
-                print(f"[+] ยิงแจ้งเตือน -> {text[:30]}...")
-                send_line_message(msg)
+        
+        try:
+            page.goto(TARGET_URL, timeout=30000)
+            page.wait_for_timeout(4000)
+
+            # 1. เจาะจงเฉพาะกล่องกิจกรรมรายใบ (fc-event)
+            event_elements = page.locator(".fc-event, a.fc-day-grid-event, a.fc-time-grid-event").all()
+            print(f"[*] พบกล่องการจองย่อยทั้งหมด: {len(event_elements)} รายการ")
+
+            for el in event_elements:
+                try:
+                    # คลิกเปิด Popup รายละเอียด
+                    el.click(timeout=1000, force=True)
+                    page.wait_for_timeout(500)
+
+                    soup = BeautifulSoup(page.content(), "html.parser")
+                    
+                    # ค้นหาตารางข้อมูลใน Modal Popup
+                    data = {}
+                    for tr in soup.find_all("tr"):
+                        tds = tr.find_all(["td", "th"])
+                        if len(tds) >= 2:
+                            k = tds[0].get_text(strip=True)
+                            v = tds[1].get_text(strip=True)
+                            data[k] = v
+
+                    room_name = data.get("ชื่อห้อง", "")
+                    topic = data.get("หัวข้อ", "")
+                    booker = data.get("ชื่อผู้จอง", "")
+                    datetime_str = data.get("วันที่", "") or data.get("วันและเวลา", "")
+
+                    # กรองเฉพาะรายการห้องประชุมที่มีข้อมูลครบถ้วน
+                    if "ห้องประชุม" in room_name or (topic and datetime_str and not "ห้องสมุด" in room_name):
+                        unique_id = f"{room_name}_{topic}_{datetime_str}_{booker}"
+
+                        if unique_id not in seen_records:
+                            seen_records.add(unique_id)
+                            new_count += 1
+                            
+                            # ข้อความ 4 หัวข้อตามที่ต้องการ
+                            msg = (
+                                f"🔔 มีการจองห้องประชุมใหม่\n"
+                                f"━━━━━━━━━━━━━━━━━━\n"
+                                f"1. หัวข้อ: {topic or '-'}\n"
+                                f"2. ชื่อห้อง: {room_name or '-'}\n"
+                                f"3. ชื่อผู้จอง: {booker or '-'}\n"
+                                f"4. วันที่ เวลา: {datetime_str or '-'}\n"
+                                f"━━━━━━━━━━━━━━━━━━\n"
+                                f"🌐 ระบบ: {TARGET_URL}"
+                            )
+                            send_line_message(msg)
+                            print(f"[+] แจ้งเตือนรายการใหม่: {topic}")
+
+                    # ปิด Popup
+                    page.keyboard.press("Escape")
+                except Exception:
+                    continue
+
+        finally:
+            browser.close()
 
         save_seen_records(seen_records)
-        browser.close()
-        print(f"[*] เสร็จสิ้น (ส่งแจ้งเตือนสำเร็จ {new_count} รายการ)")
+        print(f"[*] สแกนเสร็จสิ้น (ส่งแจ้งเตือน {new_count} รายการ)")
+
+    if playwright_instance:
+        run_scan(playwright_instance)
+    else:
+        with sync_playwright() as p:
+            run_scan(p)
 
 if __name__ == "__main__":
-    main()
+    check_rooms()
