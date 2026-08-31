@@ -1,13 +1,13 @@
 import json
 import os
-import re
 import requests
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_ACCESS_TOKEN")
 USER_ID = os.environ.get("LINE_USER_ID")
 
-BASE_URL = "http://office.scphc.ac.th:8080"
+TARGET_URL = "http://office.scphc.ac.th:8080/"
 SEEN_FILE = "seen_bookings.json"
 
 def send_line_message(text):
@@ -44,53 +44,79 @@ def save_seen_records(records):
 
 def main():
     seen_records = load_seen_records()
-    print(f"[*] Checking {BASE_URL}...")
+    print(f"[*] Opening {TARGET_URL} with Headless Browser...")
 
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    })
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto(TARGET_URL, timeout=30000)
+        # รอให้ปฏิทินเรนเดอร์กล่องกิจกรรม
+        page.wait_for_timeout(4000)
 
-    try:
-        res = session.get(BASE_URL, timeout=15)
-        html = res.text
-    except Exception as e:
-        print(f"[!] Cannot connect to website: {e}")
-        return
+        # 1. ลองดึงข้อมูลกิจกรรมทั้งหมดที่ FullCalendar เก็บไว้ใน Memory โดยตรง (เร็วมาก)
+        events_data = page.evaluate("""() => {
+            try {
+                if (window.$ && $.fn && $.fn.fullCalendar) {
+                    var clientEvents = $('.calendar, #calendar, [id*="calendar"]').fullCalendar('clientEvents');
+                    if (clientEvents && clientEvents.length > 0) {
+                        return clientEvents.map(e => ({
+                            id: e.id || '',
+                            title: e.title || '',
+                            start: e.start ? e.start.format() : '',
+                            end: e.end ? e.end.format() : '',
+                            description: e.description || '',
+                            location: e.location || '',
+                            room: e.room || ''
+                        }));
+                    }
+                }
+            } catch(err) {}
+            return [];
+        }""")
 
-    # 1. ค้นหา Endpoint ดึง Event ของปฏิทินที่ซ่อนอยู่ในหน้าเว็บ
-    # เช่น events.php, get_events.php, data.php หรือ url ใน fullcalendar
-    event_urls = re.findall(r"['\"]([^'\"]*(?:event|booking|load|data|calendar)[^'\"]*\.php[^'\"]*)['\"]", html, re.I)
-    
-    print(f"[*] Discovered calendar endpoints: {event_urls}")
+        new_count = 0
 
-    # 2. ค้นหา ID หรือรหัสการจองทั้งหมดในหน้าเว็บ
-    booking_ids = re.findall(r"(?:id|booking_id|book_id)=(\d+)", html, re.I)
-    booking_ids += re.findall(r"detail[^\d]*(\d+)", html, re.I)
-    booking_ids = list(set(booking_ids))
-    print(f"[*] Discovered booking IDs directly: {len(booking_ids)}")
+        # หากดึงจาก FullCalendar Memory ได้
+        if events_data:
+            print(f"[*] Extracted {len(events_data)} events from calendar memory directly.")
+            for ev in events_data:
+                full_text = f"{ev.get('title')} {ev.get('description')} {ev.get('location')} {ev.get('room')}"
+                if "ห้องสมุด" in full_text or "library" in full_text.lower():
+                    continue
 
-    # 3. ลองดึงข้อมูลรายละเอียดจาก ID ที่พบ
-    new_count = 0
-    for bid in booking_ids[:30]:
-        check_urls = [
-            f"{BASE_URL}/detail.php?id={bid}",
-            f"{BASE_URL}/view.php?id={bid}",
-            f"{BASE_URL}/booking_detail.php?id={bid}",
-            f"{BASE_URL}/?id={bid}"
-        ]
-        for url in check_urls:
-            try:
-                r = session.get(url, timeout=5)
-                if "รายละเอียดของ การจอง" in r.text or "ชื่อห้อง" in r.text:
-                    soup = BeautifulSoup(r.text, "html.parser")
+                ev_id = str(ev.get("id") or f"{ev.get('title')}_{ev.get('start')}")
+                if ev_id not in seen_records:
+                    seen_records.add(ev_id)
+                    new_count += 1
+                    msg = (
+                        f"🔔 รายการจองห้องประชุมใหม่\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"1. หัวข้อ: {ev.get('title')}\n"
+                        f"2. ชื่อห้อง: {ev.get('room') or ev.get('location') or 'ห้องประชุม'}\n"
+                        f"3. ชื่อผู้จอง: {ev.get('description') or '-'}\n"
+                        f"4. วันที่ เวลา: {ev.get('start')}\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"🌐 ดูรายละเอียด: {TARGET_URL}"
+                    )
+                    send_line_message(msg)
+
+        # 2. หากดึงจาก memory ไม่ได้ ให้ดึงจาก HTML elements ที่เรนเดอร์บนหน้าจอ
+        else:
+            print("[*] Fallback: Reading rendered DOM elements...")
+            event_nodes = page.locator(".fc-event, .fc-content, a.cal-event, tr.event-row").all()
+            print(f"[*] Found {len(event_nodes)} visible events on page.")
+
+            for i, node in enumerate(event_nodes[:15]):
+                try:
+                    node.click(timeout=1500)
+                    page.wait_for_timeout(600)
+
+                    soup = BeautifulSoup(page.content(), "html.parser")
                     data = {}
                     for tr in soup.find_all("tr"):
                         tds = tr.find_all(["td", "th"])
                         if len(tds) >= 2:
-                            k = tds[0].get_text(strip=True)
-                            v = tds[1].get_text(strip=True)
-                            data[k] = v
+                            data[tds[0].get_text(strip=True)] = tds[1].get_text(strip=True)
 
                     room_name = data.get("ชื่อห้อง", "")
                     topic = data.get("หัวข้อ", "")
@@ -98,7 +124,7 @@ def main():
                     datetime_str = data.get("วันที่", "")
 
                     if "ห้องประชุม" in room_name:
-                        unique_id = f"{bid}_{room_name}_{datetime_str}"
+                        unique_id = f"{room_name}_{topic}_{datetime_str}_{booker}"
                         if unique_id not in seen_records:
                             seen_records.add(unique_id)
                             new_count += 1
@@ -110,15 +136,16 @@ def main():
                                 f"3. ชื่อผู้จอง: {booker}\n"
                                 f"4. วันที่ เวลา: {datetime_str}\n"
                                 f"━━━━━━━━━━━━━━━━━━\n"
-                                f"🌐 ดูรายละเอียด: {url}"
+                                f"🌐 ดูรายละเอียด: {TARGET_URL}"
                             )
                             send_line_message(msg)
-                    break
-            except Exception:
-                continue
 
-    save_seen_records(seen_records)
-    print(f"[*] Finished check. Sent {new_count} notifications.")
+                    page.keyboard.press("Escape")
+                except Exception:
+                    continue
+
+        save_seen_records(seen_records)
+        print(f"[*] Done. Processed {new_count} new entries.")
 
 if __name__ == "__main__":
     main()
