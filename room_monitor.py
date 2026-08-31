@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import requests
 from bs4 import BeautifulSoup
 
@@ -43,7 +44,7 @@ def save_seen_records(records):
 
 def main():
     seen_records = load_seen_records()
-    print(f"[*] Fetching page from {BASE_URL}...")
+    print(f"[*] Checking {BASE_URL}...")
 
     session = requests.Session()
     session.headers.update({
@@ -54,66 +55,70 @@ def main():
         res = session.get(BASE_URL, timeout=15)
         html = res.text
     except Exception as e:
-        print(f"[!] Failed to connect: {e}")
+        print(f"[!] Cannot connect to website: {e}")
         return
 
-    soup = BeautifulSoup(html, "html.parser")
+    # 1. ค้นหา Endpoint ดึง Event ของปฏิทินที่ซ่อนอยู่ในหน้าเว็บ
+    # เช่น events.php, get_events.php, data.php หรือ url ใน fullcalendar
+    event_urls = re.findall(r"['\"]([^'\"]*(?:event|booking|load|data|calendar)[^'\"]*\.php[^'\"]*)['\"]", html, re.I)
     
-    detail_links = []
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if any(keyword in href.lower() for keyword in ["detail", "view", "booking", "id="]):
-            full_url = href if href.startswith("http") else f"{BASE_URL}/{href.lstrip('/')}"
-            if full_url not in detail_links:
-                detail_links.append(full_url)
+    print(f"[*] Discovered calendar endpoints: {event_urls}")
 
-    print(f"[*] Found {len(detail_links)} detail links to check.")
+    # 2. ค้นหา ID หรือรหัสการจองทั้งหมดในหน้าเว็บ
+    booking_ids = re.findall(r"(?:id|booking_id|book_id)=(\d+)", html, re.I)
+    booking_ids += re.findall(r"detail[^\d]*(\d+)", html, re.I)
+    booking_ids = list(set(booking_ids))
+    print(f"[*] Discovered booking IDs directly: {len(booking_ids)}")
 
+    # 3. ลองดึงข้อมูลรายละเอียดจาก ID ที่พบ
     new_count = 0
-    for link in detail_links[:20]:
-        try:
-            r = session.get(link, timeout=10)
-            sub_soup = BeautifulSoup(r.text, "html.parser")
-            
-            data = {}
-            for tr in sub_soup.find_all("tr"):
-                tds = tr.find_all(["td", "th"])
-                if len(tds) >= 2:
-                    k = tds[0].get_text(strip=True)
-                    v = tds[1].get_text(strip=True)
-                    data[k] = v
+    for bid in booking_ids[:30]:
+        check_urls = [
+            f"{BASE_URL}/detail.php?id={bid}",
+            f"{BASE_URL}/view.php?id={bid}",
+            f"{BASE_URL}/booking_detail.php?id={bid}",
+            f"{BASE_URL}/?id={bid}"
+        ]
+        for url in check_urls:
+            try:
+                r = session.get(url, timeout=5)
+                if "รายละเอียดของ การจอง" in r.text or "ชื่อห้อง" in r.text:
+                    soup = BeautifulSoup(r.text, "html.parser")
+                    data = {}
+                    for tr in soup.find_all("tr"):
+                        tds = tr.find_all(["td", "th"])
+                        if len(tds) >= 2:
+                            k = tds[0].get_text(strip=True)
+                            v = tds[1].get_text(strip=True)
+                            data[k] = v
 
-            room_name = data.get("ชื่อห้อง", "")
-            topic = data.get("หัวข้อ", "")
+                    room_name = data.get("ชื่อห้อง", "")
+                    topic = data.get("หัวข้อ", "")
+                    booker = data.get("ชื่อผู้จอง", "")
+                    datetime_str = data.get("วันที่", "")
 
-            # กรองเฉพาะรายการห้องประชุม
-            if "ห้องประชุม" in room_name or "ห้องประชุม" in r.text:
-                booker = data.get("ชื่อผู้จอง", "")
-                datetime_str = data.get("วันที่", "")
-
-                unique_id = f"{room_name}_{topic}_{datetime_str}_{booker}"
-
-                if unique_id not in seen_records:
-                    seen_records.add(unique_id)
-                    new_count += 1
-                    
-                    # รูปแบบข้อความแสดง 4 รายละเอียดตามที่ต้องการ
-                    msg = (
-                        f"🔔 รายการจองห้องประชุมใหม่\n"
-                        f"━━━━━━━━━━━━━━━━━━\n"
-                        f"1. หัวข้อ: {topic}\n"
-                        f"2. ชื่อห้อง: {room_name}\n"
-                        f"3. ชื่อผู้จอง: {booker}\n"
-                        f"4. วันที่ เวลา: {datetime_str}\n"
-                        f"━━━━━━━━━━━━━━━━━━\n"
-                        f"🌐 ดูรายละเอียด: {link}"
-                    )
-                    send_line_message(msg)
-        except Exception:
-            continue
+                    if "ห้องประชุม" in room_name:
+                        unique_id = f"{bid}_{room_name}_{datetime_str}"
+                        if unique_id not in seen_records:
+                            seen_records.add(unique_id)
+                            new_count += 1
+                            msg = (
+                                f"🔔 รายการจองห้องประชุมใหม่\n"
+                                f"━━━━━━━━━━━━━━━━━━\n"
+                                f"1. หัวข้อ: {topic}\n"
+                                f"2. ชื่อห้อง: {room_name}\n"
+                                f"3. ชื่อผู้จอง: {booker}\n"
+                                f"4. วันที่ เวลา: {datetime_str}\n"
+                                f"━━━━━━━━━━━━━━━━━━\n"
+                                f"🌐 ดูรายละเอียด: {url}"
+                            )
+                            send_line_message(msg)
+                    break
+            except Exception:
+                continue
 
     save_seen_records(seen_records)
-    print(f"[*] Finished. Found {new_count} new bookings.")
+    print(f"[*] Finished check. Sent {new_count} notifications.")
 
 if __name__ == "__main__":
     main()
